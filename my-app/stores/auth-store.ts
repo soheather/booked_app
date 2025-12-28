@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { User } from '@/types';
-import { supabase, signInWithEmail, signUpWithEmail, signOut as supabaseSignOut, getSession } from '@/services/supabase/client';
+import { supabase, signInWithEmail, signUpWithEmail, signInWithGoogle as supabaseSignInWithGoogle, signOut as supabaseSignOut, getSession } from '@/services/supabase/client';
 import type { Session, AuthChangeEvent } from '@supabase/supabase-js';
 
 interface AuthState {
@@ -21,6 +21,7 @@ interface AuthState {
   initialize: () => Promise<void>;
   signIn: (email: string, password: string) => Promise<{ success: boolean; error?: string }>;
   signUp: (email: string, password: string) => Promise<{ success: boolean; error?: string }>;
+  signInWithGoogle: () => Promise<{ success: boolean; error?: string }>;
   logout: () => Promise<void>;
   refreshSession: () => Promise<void>;
 }
@@ -171,6 +172,49 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     } catch (error) {
       console.error('Sign up error:', error);
       const errorMessage = '회원가입 중 오류가 발생했습니다.';
+      set({ error: errorMessage, isLoading: false });
+      return { success: false, error: errorMessage };
+    }
+  },
+
+  signInWithGoogle: async () => {
+    set({ isLoading: true, error: null });
+    try {
+      console.log('[auth-store] Google 로그인 시작');
+      const { data, error } = await supabaseSignInWithGoogle();
+
+      console.log('[auth-store] Google 로그인 응답:', { 
+        hasData: !!data, 
+        hasError: !!error,
+        hasSession: !!data?.session,
+        hasUser: !!data?.user
+      });
+
+      if (error) {
+        const errorMessage = error.message || 'Google 로그인에 실패했습니다.';
+        set({ error: errorMessage, isLoading: false });
+        return { success: false, error: errorMessage };
+      }
+
+      // session이 있으면 성공 (user는 session.user에 있을 수 있음)
+      if (data?.session) {
+        const user = data.user || data.session.user;
+        console.log('[auth-store] 세션 설정:', user?.email);
+        set({
+          session: data.session,
+          user: mapSupabaseUser(user),
+          isAuthenticated: true,
+          isLoading: false,
+        });
+        return { success: true };
+      }
+
+      console.log('[auth-store] 세션 없음');
+      set({ isLoading: false });
+      return { success: false, error: 'Google 로그인에 실패했습니다.' };
+    } catch (error: any) {
+      console.error('[auth-store] Google sign in error:', error);
+      const errorMessage = error?.message || 'Google 로그인 중 오류가 발생했습니다.';
       set({ error: errorMessage, isLoading: false });
       return { success: false, error: errorMessage };
     }

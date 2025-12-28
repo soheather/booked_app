@@ -1,6 +1,7 @@
-import { useEffect, useCallback } from 'react';
+import { useCallback } from 'react';
 import { StyleSheet, View, FlatList, Image, RefreshControl } from 'react-native';
 import { useRouter } from 'expo-router';
+import { useFocusEffect } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { ThemedText } from '@/components/themed-text';
@@ -30,18 +31,20 @@ export default function LibraryScreen() {
     }
   }, [user?.id, fetchBookWithNoteCount]);
 
-  useEffect(() => {
-    if (isAuthenticated && user?.id) {
-      loadData();
-    }
-  }, [isAuthenticated, user?.id, loadData]);
+  useFocusEffect(
+    useCallback(() => {
+      if (isAuthenticated && user?.id) {
+        loadData();
+      }
+    }, [isAuthenticated, user?.id, loadData])
+  );
 
   const handleBookPress = (id: string) => {
     router.push(`/book/${id}` as any);
   };
 
   const handleAddBook = () => {
-    router.push('/book/search' as any);
+    router.push('/book/search?from=library' as any);
   };
 
   const renderBook = ({ item }: { item: Book }) => {

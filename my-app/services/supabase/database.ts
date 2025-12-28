@@ -1,5 +1,7 @@
 import { supabase } from './client';
 import { Book, Note, Upload } from '@/types';
+import * as ImageManipulator from 'expo-image-manipulator';
+import { decode } from 'base64-arraybuffer';
 
 // ============ Books ============
 
@@ -180,7 +182,7 @@ export async function updateNote(
 ): Promise<Note> {
   const { data, error } = await supabase
     .from('notes')
-    .update({ ...updates, updated_at: new Date().toISOString() })
+    .update(updates)
     .eq('id', noteId)
     .select()
     .single();
@@ -200,26 +202,6 @@ export async function deleteNote(noteId: string): Promise<void> {
     console.error('Error deleting note:', error);
     throw error;
   }
-}
-
-export async function toggleNoteFavorite(noteId: string, isFavorite: boolean): Promise<Note> {
-  return updateNote(noteId, { is_favorite: isFavorite });
-}
-
-export async function fetchFavoriteNotes(userId: string): Promise<Note[]> {
-  const { data, error } = await supabase
-    .from('notes')
-    .select('*')
-    .eq('user_id', userId)
-    .eq('is_favorite', true)
-    .order('created_at', { ascending: false });
-
-  if (error) {
-    console.error('Error fetching favorite notes:', error);
-    throw error;
-  }
-
-  return data || [];
 }
 
 export async function fetchNoteCountByBook(userId: string): Promise<Map<string, number>> {
@@ -316,28 +298,43 @@ export async function uploadImage(
   uri: string,
   fileName: string
 ): Promise<string> {
-  const response = await fetch(uri);
-  const blob = await response.blob();
-
   const filePath = `${userId}/${fileName}`;
 
-  const { error } = await supabase.storage
-    .from('uploads')
-    .upload(filePath, blob, {
-      contentType: 'image/jpeg',
-      upsert: true,
-    });
+  try {
+    // HEIC → JPEG 변환 (iOS 대응)
+    const manipulatedImage = await ImageManipulator.manipulateAsync(
+      uri,
+      [{ resize: { width: 1200 } }],
+      { compress: 0.8, format: ImageManipulator.SaveFormat.JPEG, base64: true }
+    );
 
-  if (error) {
-    console.error('Error uploading image:', error);
-    throw error;
+    if (!manipulatedImage.base64) {
+      throw new Error('이미지 변환 실패');
+    }
+
+    // base64를 ArrayBuffer로 변환
+    const arrayBuffer = decode(manipulatedImage.base64);
+
+    const { error } = await supabase.storage
+      .from('uploads')
+      .upload(filePath, arrayBuffer, {
+        contentType: 'image/jpeg',
+        upsert: true,
+      });
+
+    if (error) {
+      throw error;
+    }
+
+    const { data: { publicUrl } } = supabase.storage
+      .from('uploads')
+      .getPublicUrl(filePath);
+
+    return publicUrl;
+  } catch (err) {
+    console.error('이미지 업로드 실패:', err);
+    throw err;
   }
-
-  const { data: { publicUrl } } = supabase.storage
-    .from('uploads')
-    .getPublicUrl(filePath);
-
-  return publicUrl;
 }
 
 export async function deleteImage(filePath: string): Promise<void> {
@@ -354,17 +351,14 @@ export async function deleteImage(filePath: string): Promise<void> {
 export async function fetchUserStats(userId: string): Promise<{
   totalBooks: number;
   totalNotes: number;
-  favoriteNotes: number;
 }> {
-  const [booksResult, notesResult, favoritesResult] = await Promise.all([
+  const [booksResult, notesResult] = await Promise.all([
     supabase.from('books').select('id', { count: 'exact', head: true }).eq('user_id', userId),
     supabase.from('notes').select('id', { count: 'exact', head: true }).eq('user_id', userId),
-    supabase.from('notes').select('id', { count: 'exact', head: true }).eq('user_id', userId).eq('is_favorite', true),
   ]);
 
   return {
     totalBooks: booksResult.count || 0,
     totalNotes: notesResult.count || 0,
-    favoriteNotes: favoritesResult.count || 0,
   };
 }

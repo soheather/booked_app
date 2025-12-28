@@ -6,16 +6,12 @@ import {
   TextInput,
   Alert,
   Image,
-  Modal,
-  Dimensions,
-  PanResponder,
-  GestureResponderEvent,
-  PanResponderGestureState,
+  KeyboardAvoidingView,
+  Platform,
 } from 'react-native';
 import { useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useState, useEffect, useMemo, useRef, useCallback } from 'react';
-import * as ImageManipulator from 'expo-image-manipulator';
 
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
@@ -25,22 +21,14 @@ import { Loading } from '@/components/ui/loading';
 import { Colors, Spacing, Typography, BorderRadius } from '@/constants/theme';
 import { useColorScheme } from '@/hooks/use-color-scheme';
 import { IconSymbol } from '@/components/ui/icon-symbol';
+import { BookSelectModal } from '@/components/book-select-modal';
 import { useCaptureStore } from '@/stores/capture-store';
 import { useQuotesStore } from '@/stores/quotes-store';
-import { useBooksStore } from '@/stores/books-store';
 import { useAuthStore } from '@/stores/auth-store';
+import { Book } from '@/types';
 import { processOCRText } from '@/lib/text/sentence-splitter';
-import { performBatchStructuredOCR, performStructuredOCR } from '@/services/ocr/google-vision';
-
-const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
-
-// 선택 영역 인터페이스
-interface SelectionRect {
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-}
+import { performBatchStructuredOCR } from '@/services/ocr/google-vision';
+import { uploadImage } from '@/services/supabase/database';
 
 const GOOGLE_VISION_API_KEY = process.env.EXPO_PUBLIC_GOOGLE_VISION_API_KEY || '';
 
@@ -64,24 +52,16 @@ export default function OCRResultScreen() {
 
   const { images, selectedBook, isProcessing, setProcessing, reset: resetCapture } = useCaptureStore();
   const { saveQuotes } = useQuotesStore();
-  const { findOrCreateBook } = useBooksStore();
   const { user } = useAuthStore();
 
   const [sentences, setSentences] = useState<ExtractedSentence[]>([]);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
 
-  // 이미지 선택 모달 상태
-  const [selectionModalVisible, setSelectionModalVisible] = useState(false);
-  const [selectedImageUri, setSelectedImageUri] = useState<string | null>(null);
-  const [selectedImageId, setSelectedImageId] = useState<string | null>(null);
-  const [selectionRect, setSelectionRect] = useState<SelectionRect | null>(null);
-  const [isSelecting, setIsSelecting] = useState(false);
-  const [isExtractingSelection, setIsExtractingSelection] = useState(false);
-  const [startPoint, setStartPoint] = useState<{ x: number; y: number } | null>(null);
+  const sectionListRef = useRef<SectionList>(null);
 
-  // 이미지 표시 영역 정보
-  const [imageLayout, setImageLayout] = useState<{ width: number; height: number; x: number; y: number } | null>(null);
+  // 책 선택 모달 상태
+  const [bookSelectModalVisible, setBookSelectModalVisible] = useState(false);
 
   // 초기 로드 시 OCR 처리
   useEffect(() => {
@@ -123,39 +103,58 @@ export default function OCRResultScreen() {
               console.log('감지된 페이지:', result.pageNumber);
             }
 
-            // 밑줄 친 문장 Set (중복 체크용)
-            const underlinedSet = new Set(result.underlinedSentences);
-
-            // 문단을 문장으로 분리하여 추가
-            result.paragraphs.forEach((paragraph, pIndex) => {
-              const sentences = processOCRText(paragraph);
-              sentences.forEach((content, sIndex) => {
-                // 밑줄 친 문장인지 확인
-                const isUnderlined = underlinedSet.has(content) ||
-                  result.underlinedSentences.some(u => content.includes(u) || u.includes(content));
-
-                allSentences.push({
-                  id: `sentence-${img.id}-${pIndex}-${sIndex}`,
-                  content,
-                  imageId: img.id,
-                  selected: true,
-                  isUnderlined,
-                });
-              });
-            });
-
-            // 밑줄 문장이 paragraphs에 없는 경우 별도 추가
+            // 1. 밑줄 친 문장을 먼저 추가 (우선 보여주기)
+            const addedUnderlinedIds = new Set<string>();
             result.underlinedSentences.forEach((underlined, uIndex) => {
-              const alreadyExists = allSentences.some(s =>
-                s.content === underlined || s.content.includes(underlined)
-              );
-              if (!alreadyExists && underlined.trim()) {
+              if (underlined.trim()) {
+                const id = `underlined-${img.id}-${uIndex}`;
                 allSentences.push({
-                  id: `underlined-${img.id}-${uIndex}`,
+                  id,
                   content: underlined,
                   imageId: img.id,
                   selected: true,
                   isUnderlined: true,
+                });
+                addedUnderlinedIds.add(underlined);
+              }
+            });
+
+            // 2. 일반 문단 추가 (밑줄 친 문장은 제외)
+            result.paragraphs.forEach((content, pIndex) => {
+              // 이미 밑줄 문장으로 추가된 경우 건너뛰기
+              if (addedUnderlinedIds.has(content)) {
+                return;
+              }
+
+              // 밑줄 친 부분이 포함된 문단인 경우 분리
+              let hasUnderlined = false;
+              let remainingContent = content;
+
+              for (const underlined of result.underlinedSentences) {
+                if (content.includes(underlined)) {
+                  hasUnderlined = true;
+                  // 밑줄 친 부분을 제거
+                  remainingContent = remainingContent.replace(underlined, '').trim();
+                }
+              }
+
+              // 밑줄 제거 후 남은 내용이 있으면 추가
+              if (remainingContent && remainingContent.length >= 10) {
+                allSentences.push({
+                  id: `sentence-${img.id}-${pIndex}`,
+                  content: remainingContent,
+                  imageId: img.id,
+                  selected: true,
+                  isUnderlined: false,
+                });
+              } else if (!hasUnderlined) {
+                // 밑줄이 없는 일반 문단
+                allSentences.push({
+                  id: `sentence-${img.id}-${pIndex}`,
+                  content,
+                  imageId: img.id,
+                  selected: true,
+                  isUnderlined: false,
                 });
               }
             });
@@ -207,124 +206,22 @@ export default function OCRResultScreen() {
     );
   };
 
-  const handleSelectBook = () => {
-    router.push('/book/search' as any);
-  };
-
-  // 이미지 클릭 - 선택 모달 열기
-  const handleImagePress = useCallback((imageUri: string, imageId: string) => {
-    setSelectedImageUri(imageUri);
-    setSelectedImageId(imageId);
-    setSelectionRect(null);
-    setSelectionModalVisible(true);
-  }, []);
-
-  // 선택 모달 닫기
-  const handleCloseSelectionModal = useCallback(() => {
-    setSelectionModalVisible(false);
-    setSelectedImageUri(null);
-    setSelectedImageId(null);
-    setSelectionRect(null);
-    setIsSelecting(false);
-  }, []);
-
-  // 터치 시작
-  const handleTouchStart = useCallback((event: GestureResponderEvent) => {
-    if (!imageLayout) return;
-    const { locationX, locationY } = event.nativeEvent;
-    setStartPoint({ x: locationX, y: locationY });
-    setSelectionRect({ x: locationX, y: locationY, width: 0, height: 0 });
-    setIsSelecting(true);
-  }, [imageLayout]);
-
-  // 터치 이동
-  const handleTouchMove = useCallback((event: GestureResponderEvent) => {
-    if (!isSelecting || !startPoint) return;
-    const { locationX, locationY } = event.nativeEvent;
-
-    const x = Math.min(startPoint.x, locationX);
-    const y = Math.min(startPoint.y, locationY);
-    const width = Math.abs(locationX - startPoint.x);
-    const height = Math.abs(locationY - startPoint.y);
-
-    setSelectionRect({ x, y, width, height });
-  }, [isSelecting, startPoint]);
-
-  // 터치 종료
-  const handleTouchEnd = useCallback(() => {
-    setIsSelecting(false);
-  }, []);
-
-  // 선택 영역 OCR 추출
-  const handleExtractSelection = useCallback(async () => {
-    if (!selectionRect || !selectedImageUri || !selectedImageId || !imageLayout) {
-      Alert.alert('알림', '추출할 영역을 선택해주세요.');
-      return;
-    }
-
-    if (selectionRect.width < 20 || selectionRect.height < 20) {
-      Alert.alert('알림', '선택 영역이 너무 작습니다. 더 넓게 선택해주세요.');
-      return;
-    }
-
-    setIsExtractingSelection(true);
-
-    try {
-      // 이미지 크기 비율 계산 (실제 이미지 vs 화면에 표시된 크기)
-      const imageInfo = await ImageManipulator.manipulateAsync(selectedImageUri, []);
-      const scaleX = imageInfo.width / imageLayout.width;
-      const scaleY = imageInfo.height / imageLayout.height;
-
-      // 선택 영역을 실제 이미지 좌표로 변환
-      const cropRegion = {
-        originX: Math.round(selectionRect.x * scaleX),
-        originY: Math.round(selectionRect.y * scaleY),
-        width: Math.round(selectionRect.width * scaleX),
-        height: Math.round(selectionRect.height * scaleY),
-      };
-
-      // 이미지 크롭
-      const croppedImage = await ImageManipulator.manipulateAsync(
-        selectedImageUri,
-        [{ crop: cropRegion }],
-        { compress: 0.8, format: ImageManipulator.SaveFormat.JPEG }
-      );
-
-      // 크롭된 이미지로 OCR 수행
-      const ocrResult = await performStructuredOCR(croppedImage.uri, GOOGLE_VISION_API_KEY, true);
-
-      if (ocrResult.paragraphs.length === 0) {
-        Alert.alert('알림', '선택한 영역에서 텍스트를 찾을 수 없습니다.');
-        return;
-      }
-
-      // 추출된 문장들을 목록에 추가
-      const newSentences: ExtractedSentence[] = [];
-      ocrResult.paragraphs.forEach((paragraph, pIndex) => {
-        const processed = processOCRText(paragraph);
-        processed.forEach((content, sIndex) => {
-          newSentences.push({
-            id: `manual-${Date.now()}-${pIndex}-${sIndex}`,
-            content,
-            imageId: selectedImageId,
-            selected: true,
-            isUnderlined: ocrResult.underlinedSentences.some(u => content.includes(u) || u.includes(content)),
-          });
-        });
+  // 편집 시작 및 스크롤
+  const handleStartEdit = useCallback((id: string, sectionIndex: number, itemIndex: number) => {
+    setEditingId(id);
+    // 키보드가 올라오는 시간을 고려하여 딜레이 후 스크롤
+    setTimeout(() => {
+      sectionListRef.current?.scrollToLocation({
+        sectionIndex,
+        itemIndex,
+        viewOffset: 200, // 푸터 높이를 고려한 오프셋
+        animated: true,
       });
+    }, 350);
+  }, []);
 
-      setSentences(prev => [...newSentences, ...prev]);
-      handleCloseSelectionModal();
-      Alert.alert('완료', `${newSentences.length}개의 문장이 추가되었습니다.`);
-    } catch (error) {
-      console.error('선택 영역 OCR 실패:', error);
-      Alert.alert('오류', '텍스트 추출에 실패했습니다.');
-    } finally {
-      setIsExtractingSelection(false);
-    }
-  }, [selectionRect, selectedImageUri, selectedImageId, imageLayout, handleCloseSelectionModal]);
-
-  const handleSave = async () => {
+  // 저장하기 버튼 클릭
+  const handleSave = () => {
     const selectedSentences = sentences.filter(s => s.selected && s.content.trim());
 
     if (selectedSentences.length === 0) {
@@ -337,29 +234,59 @@ export default function OCRResultScreen() {
       return;
     }
 
+    // 이미 선택된 책이 있으면 바로 저장 (책 상세에서 진입한 경우)
+    if (selectedBook) {
+      handleBookSelect(selectedBook);
+      return;
+    }
+
+    // 책 선택 모달 열기
+    setBookSelectModalVisible(true);
+  };
+
+  // 책 선택 후 저장 처리
+  const handleBookSelect = async (book: Book) => {
+    setBookSelectModalVisible(false);
+
+    const selectedSentences = sentences.filter(s => s.selected && s.content.trim());
+
+    if (selectedSentences.length === 0 || !user?.id) {
+      return;
+    }
+
     setProcessing(true);
 
     try {
-      // 책이 선택된 경우 책 저장/조회
-      let bookId: string | undefined = selectedBook?.id;
-      if (selectedBook && !bookId) {
-        const book = await findOrCreateBook(user.id, {
-          isbn: selectedBook.isbn,
-          title: selectedBook.title,
-          author: selectedBook.author,
-          publisher: selectedBook.publisher,
-          cover_url: selectedBook.cover_url,
-        });
-        bookId = book.id;
+      console.log('선택된 책:', book);
+      console.log('책 ID:', book.id);
+
+      const bookId = book.id;
+
+      // 이미지별로 업로드하고 URL 매핑 생성
+      const imageUrlMap = new Map<string, string>();
+
+      for (const img of images) {
+        try {
+          const fileName = `${Date.now()}-${img.id}.jpg`;
+          const uploadedUrl = await uploadImage(user.id, img.uri, fileName);
+          imageUrlMap.set(img.id, uploadedUrl);
+          console.log('이미지 업로드 완료:', img.id, uploadedUrl);
+        } catch (uploadError) {
+          console.error('이미지 업로드 실패:', img.id, uploadError);
+          // 이미지 업로드 실패해도 문장은 저장 진행
+        }
       }
 
-      // 문장들을 Supabase에 저장
-      const quotesData = selectedSentences.map(s => ({
-        book_id: bookId,
-        content: s.content,
-        is_favorite: false,
-        image_url: images.find(img => img.id === s.imageId)?.uri,
-      }));
+      // 문장들을 Supabase에 저장 (이미지 URL 포함)
+      const quotesData = selectedSentences.map(s => {
+        const imageUrl = imageUrlMap.get(s.imageId);
+        return {
+          book_id: bookId,
+          content: s.content,
+          is_favorite: false,
+          ...(imageUrl && { image_url: imageUrl }),
+        };
+      });
 
       await saveQuotes(user.id, quotesData);
 
@@ -372,7 +299,9 @@ export default function OCRResultScreen() {
         [
           {
             text: '확인',
-            onPress: () => router.replace('/(tabs)'),
+            onPress: () => {
+              router.replace(`/book/${bookId}` as any);
+            },
           },
         ]
       );
@@ -412,34 +341,32 @@ export default function OCRResultScreen() {
   }, [sentences, images]);
 
   const renderSectionHeader = ({ section }: { section: { imageId: string; imageUri: string; data: ExtractedSentence[] } }) => (
-    <Pressable
-      style={styles.sectionHeader}
-      onPress={() => handleImagePress(section.imageUri, section.imageId)}
-    >
+    <View style={styles.sectionHeader}>
       <Image
         source={{ uri: section.imageUri }}
         style={styles.sectionImage}
-        resizeMode="cover"
+        resizeMode="contain"
       />
-      <View style={styles.sectionImageOverlay}>
-        <View style={styles.sectionImageBadge}>
-          <IconSymbol name="doc.text.image" size={14} color="#fff" />
-          <ThemedText style={styles.sectionImageBadgeText}>
-            {section.data.length}개 문장
-          </ThemedText>
-        </View>
-        <View style={styles.sectionSelectHint}>
-          <IconSymbol name="hand.draw" size={12} color="#fff" />
-          <ThemedText style={styles.sectionSelectHintText}>
-            탭하여 영역 선택
-          </ThemedText>
-        </View>
+      <View style={styles.sectionImageBadge}>
+        <IconSymbol name="doc.text.image" size={14} color="#fff" />
+        <ThemedText style={styles.sectionImageBadgeText}>
+          {section.data.length}개 문장
+        </ThemedText>
       </View>
-    </Pressable>
+    </View>
   );
 
-  const renderSentence = ({ item }: { item: ExtractedSentence }) => {
+  const renderSentence = ({ item, index, section }: { item: ExtractedSentence; index: number; section: { imageId: string; imageUri: string; data: ExtractedSentence[] } }) => {
     const isEditing = editingId === item.id;
+    const sectionIndex = groupedSentences.findIndex(s => s.imageId === section.imageId);
+
+    const handleEditPress = () => {
+      if (isEditing) {
+        setEditingId(null);
+      } else {
+        handleStartEdit(item.id, sectionIndex, index);
+      }
+    };
 
     return (
       <Card
@@ -486,14 +413,14 @@ export default function OCRResultScreen() {
                 autoFocus
               />
             ) : (
-              <ThemedText style={[styles.sentenceText, Typography.quote]}>
+              <ThemedText style={styles.sentenceText}>
                 "{item.content}"
               </ThemedText>
             )}
           </View>
 
           <Pressable
-            onPress={() => setEditingId(isEditing ? null : item.id)}
+            onPress={handleEditPress}
             style={styles.editButton}
           >
             <IconSymbol
@@ -518,71 +445,63 @@ export default function OCRResultScreen() {
   if (isProcessing) {
     return (
       <ThemedView style={styles.container}>
-        <Loading message="저장 중..." fullScreen />
+        <Loading message="이미지 업로드 및 저장 중..." fullScreen />
       </ThemedView>
     );
   }
 
   return (
-    <ThemedView style={styles.container}>
-      <View style={styles.content}>
-        <View style={styles.header}>
-          <ThemedText style={[styles.title, Typography.h2]}>
-            추출된 문장
-          </ThemedText>
-          <ThemedText style={[styles.subtitle, { color: colors.textSecondary }]}>
-            저장할 문장을 선택하고 필요하면 수정하세요
-          </ThemedText>
+    <KeyboardAvoidingView
+      style={styles.container}
+      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+      keyboardVerticalOffset={Platform.OS === 'ios' ? 90 : 0}
+    >
+      <ThemedView style={styles.container}>
+        <View style={styles.content}>
+          {groupedSentences.length > 0 ? (
+            <SectionList
+              ref={sectionListRef}
+              sections={groupedSentences}
+              renderItem={renderSentence}
+              renderSectionHeader={renderSectionHeader}
+              keyExtractor={(item) => item.id}
+              contentContainerStyle={styles.listContent}
+              showsVerticalScrollIndicator={false}
+              stickySectionHeadersEnabled={false}
+              keyboardShouldPersistTaps="handled"
+            />
+          ) : (
+            <View style={styles.emptyContainer}>
+              <IconSymbol name="doc.text" size={48} color={colors.textTertiary} />
+              <ThemedText style={[styles.emptyText, { color: colors.textSecondary }]}>
+                추출된 문장이 없습니다
+              </ThemedText>
+            </View>
+          )}
         </View>
 
-        {/* 책 선택 */}
-        <Pressable
-          onPress={handleSelectBook}
-          style={[styles.bookSelect, { backgroundColor: colors.backgroundSecondary }]}
-        >
-          <View style={styles.bookSelectContent}>
-            <IconSymbol name="book.closed.fill" size={20} color={Colors.brand.primary} />
-            <ThemedText style={[styles.bookSelectText, { color: selectedBook ? colors.text : colors.textSecondary }]}>
-              {selectedBook ? selectedBook.title : '책을 선택해주세요'}
+        <View style={[styles.footer, { paddingBottom: insets.bottom + Spacing.lg }]}>
+          <View style={styles.footerInfo}>
+            <ThemedText style={[styles.selectedCount, { color: colors.textSecondary }]}>
+              {selectedCount}개 문장 선택됨
             </ThemedText>
           </View>
-          <IconSymbol name="chevron.right" size={16} color={colors.textTertiary} />
-        </Pressable>
-
-        {groupedSentences.length > 0 ? (
-          <SectionList
-            sections={groupedSentences}
-            renderItem={renderSentence}
-            renderSectionHeader={renderSectionHeader}
-            keyExtractor={(item) => item.id}
-            contentContainerStyle={styles.listContent}
-            showsVerticalScrollIndicator={false}
-            stickySectionHeadersEnabled={false}
+          <Button
+            title="저장하기"
+            onPress={handleSave}
+            disabled={selectedCount === 0}
+            fullWidth
           />
-        ) : (
-          <View style={styles.emptyContainer}>
-            <IconSymbol name="doc.text" size={48} color={colors.textTertiary} />
-            <ThemedText style={[styles.emptyText, { color: colors.textSecondary }]}>
-              추출된 문장이 없습니다
-            </ThemedText>
-          </View>
-        )}
-      </View>
-
-      <View style={[styles.footer, { paddingBottom: insets.bottom + Spacing.lg }]}>
-        <View style={styles.footerInfo}>
-          <ThemedText style={[styles.selectedCount, { color: colors.textSecondary }]}>
-            {selectedCount}개 문장 선택됨
-          </ThemedText>
         </View>
-        <Button
-          title="저장하기"
-          onPress={handleSave}
-          disabled={selectedCount === 0}
-          fullWidth
+
+        {/* 책 선택 모달 */}
+        <BookSelectModal
+          visible={bookSelectModalVisible}
+          onClose={() => setBookSelectModalVisible(false)}
+          onSelect={handleBookSelect}
         />
-      </View>
-    </ThemedView>
+      </ThemedView>
+    </KeyboardAvoidingView>
   );
 }
 
@@ -593,39 +512,10 @@ const styles = StyleSheet.create({
   content: {
     flex: 1,
   },
-  header: {
-    paddingHorizontal: Spacing.lg,
-    paddingTop: Spacing.lg,
-    paddingBottom: Spacing.md,
-  },
-  title: {
-    marginBottom: Spacing.xs,
-  },
-  subtitle: {
-    ...Typography.body,
-  },
-  bookSelect: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    marginHorizontal: Spacing.lg,
-    marginBottom: Spacing.md,
-    padding: Spacing.md,
-    borderRadius: BorderRadius.lg,
-  },
-  bookSelectContent: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: Spacing.sm,
-    flex: 1,
-  },
-  bookSelectText: {
-    ...Typography.body,
-    flex: 1,
-  },
   listContent: {
     padding: Spacing.lg,
     paddingTop: Spacing.sm,
+    paddingBottom: 200,
   },
   sentenceCard: {
     marginBottom: Spacing.md,
@@ -653,11 +543,12 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   sentenceText: {
-    lineHeight: 28,
+    fontSize: 14,
+    lineHeight: 22,
   },
   textInput: {
-    ...Typography.quote,
-    lineHeight: 28,
+    fontSize: 14,
+    lineHeight: 22,
     padding: 0,
   },
   editButton: {
@@ -706,25 +597,19 @@ const styles = StyleSheet.create({
     marginBottom: Spacing.md,
     borderRadius: BorderRadius.lg,
     overflow: 'hidden',
-    height: 160,
-    position: 'relative',
+    backgroundColor: 'rgba(0,0,0,0.05)',
   },
   sectionImage: {
     width: '100%',
-    height: '100%',
-  },
-  sectionImageOverlay: {
-    position: 'absolute',
-    bottom: 0,
-    left: 0,
-    right: 0,
-    padding: Spacing.sm,
-    backgroundColor: 'rgba(0,0,0,0.4)',
+    aspectRatio: 3 / 4,
   },
   sectionImageBadge: {
     flexDirection: 'row',
     alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: Spacing.sm,
     gap: 6,
+    backgroundColor: 'rgba(0,0,0,0.6)',
   },
   sectionImageBadgeText: {
     fontSize: 13,

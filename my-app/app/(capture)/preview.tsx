@@ -77,7 +77,7 @@ export default function PreviewScreen() {
     }
   };
 
-  const handleNext = async () => {
+  const handleAutoExtract = async () => {
     if (images.length === 0) {
       Alert.alert('알림', '이미지를 선택해주세요.');
       return;
@@ -91,6 +91,16 @@ export default function PreviewScreen() {
       setProcessing(false);
       router.push('/(capture)/ocr-result');
     }, 500);
+  };
+
+  const handleManualExtract = () => {
+    if (images.length === 0) {
+      Alert.alert('알림', '이미지를 선택해주세요.');
+      return;
+    }
+
+    // 직접 추출 화면으로 이동
+    router.push('/(capture)/manual-extract');
   };
 
   const renderImage = ({ item, index }: { item: ImageAsset; index: number }) => (
@@ -165,13 +175,24 @@ export default function PreviewScreen() {
       </View>
 
       <View style={[styles.footer, { paddingBottom: insets.bottom + Spacing.lg }]}>
-        <Button
-          title="문장 추출하기"
-          onPress={handleNext}
-          fullWidth
-          disabled={images.length === 0}
-          rightIcon={<IconSymbol name="arrow.right" size={18} color="#fff" />}
-        />
+        <ThemedText style={[styles.footerTitle, { color: colors.textSecondary }]}>
+          추출 방식 선택
+        </ThemedText>
+        <View style={styles.buttonRow}>
+          <Button
+            title="직접 추출"
+            onPress={handleManualExtract}
+            variant="outline"
+            disabled={images.length === 0}
+            style={styles.extractButton}
+          />
+          <Button
+            title="자동 추출"
+            onPress={handleAutoExtract}
+            disabled={images.length === 0}
+            style={styles.extractButton}
+          />
+        </View>
       </View>
     </ThemedView>
   );
@@ -264,5 +285,17 @@ const styles = StyleSheet.create({
   footer: {
     paddingHorizontal: Spacing.lg,
     paddingTop: Spacing.md,
+  },
+  footerTitle: {
+    ...Typography.caption,
+    textAlign: 'center',
+    marginBottom: Spacing.sm,
+  },
+  buttonRow: {
+    flexDirection: 'row',
+    gap: Spacing.md,
+  },
+  extractButton: {
+    flex: 1,
   },
 });

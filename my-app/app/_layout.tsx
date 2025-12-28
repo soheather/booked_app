@@ -22,12 +22,12 @@ export default function RootLayout() {
   return (
     <ThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
       <Stack>
-        <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
+        <Stack.Screen name="(tabs)" options={{ headerShown: false, headerBackTitle: '홈' }} />
         <Stack.Screen name="(capture)" options={{ headerShown: false, presentation: 'modal' }} />
         <Stack.Screen name="(auth)" options={{ headerShown: false }} />
-        <Stack.Screen name="book/[id]" options={{ title: '책 상세' }} />
-        <Stack.Screen name="book/search" options={{ title: '책 검색' }} />
-        <Stack.Screen name="note/[id]" options={{ title: '문장 상세' }} />
+        <Stack.Screen name="book/[id]" options={{ title: '책 상세', headerBackTitle: '서재' }} />
+        <Stack.Screen name="book/search" options={{ title: '책 검색', headerBackTitle: '서재' }} />
+        <Stack.Screen name="note/[id]" options={{ title: '문장 상세', headerBackTitle: '내 문장' }} />
         <Stack.Screen name="modal" options={{ presentation: 'modal', title: 'Modal' }} />
       </Stack>
       <StatusBar style="auto" />

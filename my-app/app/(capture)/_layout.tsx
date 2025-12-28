@@ -23,7 +23,6 @@ export default function CaptureLayout() {
         name="camera"
         options={{
           title: '사진 촬영',
-          presentation: 'modal',
           headerShown: false,
         }}
       />
@@ -38,6 +37,13 @@ export default function CaptureLayout() {
         name="ocr-result"
         options={{
           title: '문장 확인',
+          headerBackTitle: '뒤로',
+        }}
+      />
+      <Stack.Screen
+        name="manual-extract"
+        options={{
+          title: '직접 추출',
           headerBackTitle: '뒤로',
         }}
       />

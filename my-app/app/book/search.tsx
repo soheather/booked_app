@@ -1,6 +1,6 @@
 import { useState, useCallback } from 'react';
 import { View, StyleSheet, FlatList, Image, Pressable, Alert } from 'react-native';
-import { router } from 'expo-router';
+import { router, useLocalSearchParams } from 'expo-router';
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 import { Input } from '@/components/ui/input';
@@ -11,6 +11,7 @@ import { Colors, Spacing, BorderRadius, Typography } from '@/constants/theme';
 import { useColorScheme } from '@/hooks/use-color-scheme';
 import { useBooksStore } from '@/stores/books-store';
 import { useCaptureStore } from '@/stores/capture-store';
+import { useAuthStore } from '@/stores/auth-store';
 import { IconSymbol } from '@/components/ui/icon-symbol';
 import { Book, BookSearchResult } from '@/types';
 import { searchBooks } from '@/services/books/naver-api';
@@ -22,14 +23,16 @@ const NAVER_CLIENT_SECRET = process.env.EXPO_PUBLIC_NAVER_CLIENT_SECRET || '';
 export default function BookSearchScreen() {
   const colorScheme = useColorScheme() ?? 'light';
   const colors = Colors[colorScheme];
+  const { from } = useLocalSearchParams<{ from?: string }>();
 
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<BookSearchResult[]>([]);
   const [isSearching, setIsSearching] = useState(false);
 
-  const addBook = useBooksStore((state) => state.addBook);
-  const books = useBooksStore((state) => state.books);
+  const { books, findOrCreateBook } = useBooksStore();
   const setSelectedBook = useCaptureStore((state) => state.setSelectedBook);
+  const user = useAuthStore((state) => state.user);
+  const [isSaving, setIsSaving] = useState(false);
 
   const handleSearch = useCallback(async () => {
     if (!query.trim()) return;
@@ -64,28 +67,42 @@ export default function BookSearchScreen() {
     }
   }, [query]);
 
-  const handleSelectBook = (result: BookSearchResult) => {
-    // 이미 저장된 책인지 확인
-    const existingBook = books.find((b) => b.isbn === result.isbn);
+  const handleSelectBook = async (result: BookSearchResult) => {
+    if (!user?.id) {
+      Alert.alert('알림', '로그인이 필요합니다.');
+      return;
+    }
 
-    if (existingBook) {
-      setSelectedBook(existingBook);
-    } else {
-      const newBook: Book = {
-        id: `book-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
-        user_id: 'temp-user', // TODO: 실제 사용자 ID
+    setIsSaving(true);
+
+    try {
+      // Supabase에 책 저장 (이미 있으면 기존 책 반환)
+      const book = await findOrCreateBook(user.id, {
         isbn: result.isbn,
         title: result.title,
         author: result.author,
         publisher: result.publisher,
         cover_url: result.cover_url || undefined,
-        created_at: new Date().toISOString(),
-      };
-      addBook(newBook);
-      setSelectedBook(newBook);
-    }
+      });
 
-    router.back();
+      console.log('✅ 책 저장/조회 완료:', book.title, book.id);
+
+      if (from === 'library') {
+        // 내 서재에서 진입: 책만 저장하고 내 서재로 돌아감
+        Alert.alert('완료', `"${book.title}"이(가) 내 서재에 추가되었습니다.`, [
+          { text: '확인', onPress: () => router.back() }
+        ]);
+      } else {
+        // OCR 결과에서 진입: 책 선택 후 OCR 결과 화면으로 이동
+        setSelectedBook(book);
+        router.back();
+      }
+    } catch (error) {
+      console.error('책 저장 실패:', error);
+      Alert.alert('오류', '책을 저장하는 중 문제가 발생했습니다.');
+    } finally {
+      setIsSaving(false);
+    }
   };
 
   const renderSearchResult = ({ item }: { item: BookSearchResult }) => (
@@ -136,8 +153,8 @@ export default function BookSearchScreen() {
       </View>
 
       {/* Results */}
-      {isSearching ? (
-        <Loading message="검색 중..." />
+      {isSearching || isSaving ? (
+        <Loading message={isSaving ? "책을 저장하는 중..." : "검색 중..."} />
       ) : (
         <FlatList
           data={results}

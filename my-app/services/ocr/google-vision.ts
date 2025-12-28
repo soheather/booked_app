@@ -6,6 +6,33 @@ import { OCRResult } from '@/types';
 // Gemini API 설정
 const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent';
 
+// 바운딩 박스 OCR 결과 인터페이스 (직접 추출용)
+export interface OCRBoundingBox {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export interface OCRTextBlock {
+  id: string;
+  text: string;
+  boundingBox: OCRBoundingBox;
+  lines: OCRTextLine[];
+}
+
+export interface OCRTextLine {
+  id: string;
+  text: string;
+  boundingBox: OCRBoundingBox;
+}
+
+export interface OCRWithBoundingBoxResult {
+  blocks: OCRTextBlock[];
+  imageWidth: number;
+  imageHeight: number;
+}
+
 // 이미지 최대 크기 (토큰 절약)
 const MAX_IMAGE_SIZE = 1024;
 
@@ -132,19 +159,55 @@ async function imageToBase64(uri: string): Promise<string> {
 }
 
 // 시스템 프롬프트 (구조화된 JSON 출력)
-const SYSTEM_PROMPT = `당신은 책 이미지에서 텍스트를 추출하는 OCR 전문가입니다.
+const SYSTEM_PROMPT = `당신은 책 이미지에서 텍스트를 읽기 좋은 의미 단위로 추출하는 OCR 전문가입니다.
 이미지를 분석하고 아래 JSON 형식으로만 응답하세요:
 
 {
-  "paragraphs": ["첫 번째 문단", "두 번째 문단", ...],
+  "paragraphs": ["의미 단위 1", "의미 단위 2", ...],
   "underlinedSentences": ["밑줄 친 문장1", ...],
   "bookTitle": "감지된 책 제목 또는 null",
   "pageNumber": 감지된 페이지 번호 또는 null
 }
 
-규칙:
-1. paragraphs: 이미지 속에서 읽을 수 있는 모든 텍스트를 자연스러운 읽기 순서와 흐름을 유지하여 추출하세요. 같은 문단 또는 같은 생각을 이루는 문장들은 하나의 연결된 문장으로 합쳐서 구성하세요. 줄바꿈이나 들여쓰기로 구분된 단락을 하나의 문단으로 그룹화합니다.
-2. underlinedSentences: 밑줄이 그어진 문장만 별도로 추출합니다. 밑줄이 없으면 빈 배열 []을 반환합니다.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+paragraphs 추출 핵심 원칙:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+🎯 하나의 완전한 이야기/주제가 끝날 때까지 절대 자르지 마세요!
+🎯 여러 문장이어도 같은 맥락이면 하나로 유지하세요!
+🎯 문장부호(마침표, 따옴표)는 분리 기준이 아닙니다!
+
+분리하는 경우 (이 경우에만):
+✓ 완전히 다른 주제로 전환될 때
+✓ 새로운 이야기/에피소드가 시작될 때
+✓ 시간이나 장면이 바뀔 때
+✓ 설명이 끝나고 새로운 논점이 시작될 때
+
+반드시 함께 유지 (절대 분리 금지):
+✗ 인용문 + 그 설명 ("그는 말했다. '내용'" → 하나로!)
+✗ 예시 + 그에 대한 해석
+✗ 질문 + 답변
+✗ 이어지는 대화
+✗ 원인 + 결과
+✗ 나열된 항목 + 설명
+
+예시:
+❌ 나쁜 분리: ["그는 말했다.", "'좋은 생각이야.'", "나도 동의했다."]
+✅ 좋은 분리: ["그는 말했다. '좋은 생각이야.' 나도 동의했다."]
+
+길이:
+• 최소 50자 이상 (짧게 자르지 마세요!)
+• 평균 150-300자 권장
+• 최대 500자까지 허용 (맥락이 이어지면 길어도 좋음)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+2. underlinedSentences: 
+   - 밑줄이 그어진 문장만 정확히 추출합니다
+   - 밑줄 친 부분만 추출하고, 앞뒤 맥락은 포함하지 마세요
+   - 밑줄이 없으면 빈 배열 []을 반환합니다
+   - ⚠️ 중요: underlinedSentences에 포함된 내용은 paragraphs에서 제외하세요
+
 3. bookTitle: 이미지 상단이나 하단에 책 제목이 보이면 추출합니다. 없으면 null.
 4. pageNumber: 페이지 번호가 보이면 숫자로 추출합니다. 없으면 null.
 
@@ -269,6 +332,102 @@ function parseGeminiResponse(responseText: string): OCRStructuredResult {
 }
 
 /**
+ * Gemini로 텍스트를 맥락 기반으로 분리
+ * (이미지 없이 텍스트만 분석하므로 토큰 절약)
+ */
+async function analyzeContextWithGemini(text: string, apiKey: string): Promise<string[]> {
+  const contextPrompt = `당신은 책 텍스트를 독자가 읽기 편한 단위로 분리하는 전문가입니다.
+다음 텍스트를 자연스러운 의미 덩어리로 분리하세요.
+
+핵심 원칙:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1. 하나의 완전한 이야기나 주제가 끝날 때까지 절대 자르지 마세요
+2. 여러 문장이어도 같은 맥락이면 하나로 유지하세요
+3. 문장부호(마침표, 따옴표)는 분리 기준이 아닙니다
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+분리 기준 (이 경우에만 분리):
+✓ 완전히 다른 주제로 전환될 때
+✓ 새로운 이야기/에피소드가 시작될 때  
+✓ 시간이나 장면이 바뀔 때
+✓ 설명이 끝나고 새로운 논점이 시작될 때
+
+유지해야 할 것 (절대 분리하지 마세요):
+✗ 인용문과 그 설명
+✗ 예시와 그에 대한 해석
+✗ 질문과 답변
+✗ 대화가 이어지는 부분
+✗ 원인과 결과
+✗ 나열된 항목들과 그 설명
+
+예시로 배우기:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+❌ 나쁜 분리 (너무 짧게 자름):
+["뇌과학자 장동선 박사는 한 팟캐스트에 출연해 사람이 행복하기 위한 세 가지 조건을 이렇게 말한 적 있다.", "내가 스스로 선택한다는 자율성, 어떤 것을 배워가면서 더 나아진다고 느끼는 성취감, 마음 맞는 사람이 나를 알아주는 연결감.", "그러니까 지금의 삶은 이 세 가지를 가지런히 놓고 나를 조율해 보는 시간인지도 모르겠다."]
+
+✅ 좋은 분리 (하나의 주제로 유지):
+["뇌과학자 장동선 박사는 한 팟캐스트에 출연해 사람이 행복하기 위한 세 가지 조건을 이렇게 말한 적 있다. 내가 스스로 선택한다는 자율성, 어떤 것을 배워가면서 더 나아진다고 느끼는 성취감, 마음 맞는 사람이 나를 알아주는 연결감. 그러니까 지금의 삶은 이 세 가지를 가지런히 놓고 나를 조율해 보는 시간인지도 모르겠다."]
+
+✅ 대화 포함 예시 (하나의 에피소드):
+["좀 더 자본주의적으로 말하자면, 나는 이 시간을 돈으로 샀다고 생각한다. 내 동생이 번 돈이다. 지난여름 남쪽으로 휴가를 떠나는 차 안에서 문득 감격스러워져 말한 적 있다. 아, 일 걱정 없이 떠나는 여행이 얼마 만인지 모르겠어? 운전을 하던 강이 말했다. '그게 다 지금껏 열심히 일한 동생 덕분인 줄 알아. 고마워해야 돼.' 강의 논리는 이랬다. 과거의 나는 동생이고, 미래의 나는 언니인데..."]
+
+길이 가이드:
+• 최소 50자 이상 (짧게 자르지 마세요)
+• 평균 150-300자 권장
+• 최대 500자까지 허용 (맥락이 이어지면 길어도 좋음)
+• 의미가 완결되는 것이 길이보다 중요
+
+JSON 배열로만 응답하세요:
+["단위1", "단위2", ...]
+
+텍스트:
+${text}`;
+
+  try {
+    const requestBody = {
+      contents: [{ parts: [{ text: contextPrompt }] }],
+      generationConfig: {
+        temperature: 0.2, // 더 일관성 있게
+        maxOutputTokens: 2048,
+        responseMimeType: 'application/json',
+      },
+    };
+
+    console.log('Gemini로 맥락 분석 시작...');
+    const response = await fetch(`${GEMINI_API_URL}?key=${apiKey}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(requestBody),
+    });
+
+    if (!response.ok) {
+      throw new Error(`Gemini API 실패: ${response.status}`);
+    }
+
+    const data: GeminiResponse = await response.json();
+    const responseText = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
+    console.log('맥락 분석 완료:', responseText.substring(0, 100));
+    
+    const parsed = JSON.parse(responseText);
+    if (Array.isArray(parsed) && parsed.length > 0) {
+      console.log('맥락 기반 분리 성공:', parsed.length, '개 단위');
+      // 각 단위의 평균 길이 로깅
+      const avgLength = parsed.reduce((sum, item) => sum + item.length, 0) / parsed.length;
+      console.log('평균 단위 길이:', Math.round(avgLength), '자');
+      return parsed;
+    }
+    
+    // 배열이 아니거나 비어있으면 원본 반환
+    throw new Error('유효하지 않은 응답');
+  } catch (error) {
+    console.warn('Gemini 맥락 분석 실패, 기본 분리로 폴백:', error);
+    // 파싱 실패시 기존 방식으로 폴백 (문장부호 기준)
+    return text.split(/[.!?。！？]\s+/).filter(s => s.trim().length > 5);
+  }
+}
+
+/**
  * 구조화된 OCR 수행 (Gemini API 사용)
  */
 export async function performStructuredOCR(
@@ -297,12 +456,14 @@ export async function performOCR(
   const onDeviceResult = await performOnDeviceOCR(resizedUri);
 
   if (onDeviceResult && onDeviceResult.length > 10) {
-    console.log('온디바이스 OCR 결과 사용 (API 호출 절약)');
-    return onDeviceResult;
+    console.log('온디바이스 OCR 성공, Gemini로 맥락 분석 중...');
+    // ML Kit 결과를 Gemini로 맥락 분석 (이미지 없이 텍스트만 전송 - 토큰 절약)
+    const contextualSentences = await analyzeContextWithGemini(onDeviceResult, apiKey);
+    return contextualSentences.join('\n\n');
   }
 
   // 3단계: Gemini 폴백 (텍스트가 없거나 너무 짧은 경우)
-  console.log('Gemini API 폴백 사용');
+  console.log('Gemini API 폴백 사용 (이미지 분석)');
   const result = await performGeminiOCR(resizedUri, apiKey, false);
   // 문단들을 합쳐서 반환
   return result.paragraphs.join('\n\n');
@@ -407,4 +568,73 @@ export function createOCRResultFromStructured(
     sentences: structured.paragraphs,
     confidence: structured.paragraphs.length > 0 ? 0.9 : 0,
   };
+}
+
+/**
+ * 바운딩 박스 OCR 수행 (직접 추출용 - ML Kit 온디바이스 OCR)
+ * AI 분석 없이 순수 텍스트 인식 + 좌표만 반환
+ * Development Build에서만 작동
+ */
+export async function performOCRWithBoundingBox(
+  imageUri: string
+): Promise<OCRWithBoundingBoxResult> {
+  console.log('=== 바운딩 박스 OCR 시작 (ML Kit 온디바이스) ===');
+
+  // 웹에서는 지원하지 않음
+  if (Platform.OS === 'web') {
+    throw new Error('웹 환경에서는 온디바이스 OCR을 지원하지 않습니다.');
+  }
+
+  try {
+    // 이미지 리사이즈
+    const resizedUri = await resizeImage(imageUri);
+
+    // ML Kit 텍스트 인식
+    const TextRecognition = require('@react-native-ml-kit/text-recognition').default;
+    const result = await TextRecognition.recognize(resizedUri);
+
+    if (!result || !result.blocks || result.blocks.length === 0) {
+      console.log('바운딩 박스 OCR: 텍스트 없음');
+      return { blocks: [], imageWidth: MAX_IMAGE_SIZE, imageHeight: 0 };
+    }
+
+    console.log('ML Kit 블록 수:', result.blocks.length);
+
+    // ML Kit 결과를 OCRWithBoundingBoxResult 형태로 변환
+    const blocks: OCRTextBlock[] = result.blocks.map((block: any, blockIndex: number) => {
+      const lines: OCRTextLine[] = (block.lines || []).map((line: any, lineIndex: number) => ({
+        id: `line-${blockIndex}-${lineIndex}`,
+        text: line.text || '',
+        boundingBox: {
+          x: line.frame?.x || 0,
+          y: line.frame?.y || 0,
+          width: line.frame?.width || 0,
+          height: line.frame?.height || 0,
+        },
+      }));
+
+      return {
+        id: `block-${blockIndex}`,
+        text: block.text || '',
+        boundingBox: {
+          x: block.frame?.x || 0,
+          y: block.frame?.y || 0,
+          width: block.frame?.width || 0,
+          height: block.frame?.height || 0,
+        },
+        lines,
+      };
+    });
+
+    console.log('바운딩 박스 OCR 완료 - 블록:', blocks.length);
+
+    return {
+      blocks,
+      imageWidth: MAX_IMAGE_SIZE,
+      imageHeight: 0,
+    };
+  } catch (error: any) {
+    console.error('ML Kit OCR 실패:', error?.message || error);
+    throw new Error('온디바이스 OCR 실패. Development Build가 필요합니다.');
+  }
 }

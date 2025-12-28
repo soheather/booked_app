@@ -18,7 +18,7 @@ export default function LoginScreen() {
   const colors = Colors[colorScheme];
   const insets = useSafeAreaInsets();
 
-  const { signIn, isLoading, error, clearError } = useAuthStore();
+  const { signIn, signInWithGoogle, isLoading, error, clearError } = useAuthStore();
 
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -34,6 +34,15 @@ export default function LoginScreen() {
       router.replace('/(tabs)');
     } else if (result.error) {
       Alert.alert('로그인 실패', result.error);
+    }
+  };
+
+  const handleGoogleLogin = async () => {
+    const result = await signInWithGoogle();
+    if (result.success) {
+      router.replace('/(tabs)');
+    } else if (result.error) {
+      Alert.alert('Google 로그인 실패', result.error);
     }
   };
 
@@ -107,6 +116,35 @@ export default function LoginScreen() {
               fullWidth
               style={styles.loginButton}
             />
+
+            {/* 구분선 */}
+            <View style={styles.divider}>
+              <View style={[styles.dividerLine, { backgroundColor: colors.border }]} />
+              <ThemedText style={[styles.dividerText, { color: colors.textTertiary }]}>
+                또는
+              </ThemedText>
+              <View style={[styles.dividerLine, { backgroundColor: colors.border }]} />
+            </View>
+
+            {/* Google 로그인 버튼 */}
+            <Pressable
+              onPress={handleGoogleLogin}
+              disabled={isLoading}
+              style={({ pressed }) => [
+                styles.googleButton,
+                {
+                  backgroundColor: colors.card,
+                  borderColor: colors.border,
+                },
+                pressed && { opacity: 0.7 },
+                isLoading && { opacity: 0.5 },
+              ]}
+            >
+              <IconSymbol name="globe" size={20} color={colors.text} />
+              <ThemedText style={[styles.googleButtonText, { color: colors.text }]}>
+                Google로 계속하기
+              </ThemedText>
+            </Pressable>
           </View>
 
           <View style={styles.footer}>
@@ -187,6 +225,32 @@ const styles = StyleSheet.create({
     ...Typography.body,
   },
   signUpLink: {
+    ...Typography.body,
+    fontWeight: '600',
+  },
+  divider: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginVertical: Spacing.md,
+  },
+  dividerLine: {
+    flex: 1,
+    height: 1,
+  },
+  dividerText: {
+    ...Typography.bodySmall,
+    paddingHorizontal: Spacing.md,
+  },
+  googleButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    height: 52,
+    borderRadius: BorderRadius.md,
+    borderWidth: 1,
+    gap: Spacing.sm,
+  },
+  googleButtonText: {
     ...Typography.body,
     fontWeight: '600',
   },

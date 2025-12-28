@@ -69,7 +69,7 @@ export default function SettingsScreen() {
   const { quotes } = useQuotesStore();
   const { books } = useBooksStore();
 
-  const [stats, setStats] = useState({ totalBooks: 0, totalNotes: 0, favoriteNotes: 0 });
+  const [stats, setStats] = useState({ totalBooks: 0, totalNotes: 0 });
 
   useEffect(() => {
     const loadStats = async () => {
@@ -153,15 +153,6 @@ export default function SettingsScreen() {
                 </ThemedText>
                 <ThemedText style={[styles.statLabel, { color: colors.textTertiary }]}>
                   문장
-                </ThemedText>
-              </View>
-              <View style={[styles.statDivider, { backgroundColor: colors.borderLight }]} />
-              <View style={styles.statItem}>
-                <ThemedText style={[styles.statValue, { color: Colors.brand.primary }]}>
-                  {stats.favoriteNotes}
-                </ThemedText>
-                <ThemedText style={[styles.statLabel, { color: colors.textTertiary }]}>
-                  즐겨찾기
                 </ThemedText>
               </View>
             </View>

@@ -87,17 +87,31 @@ export const useBooksStore = create<BooksState>((set, get) => ({
   saveBook: async (userId, bookData) => {
     set({ isSyncing: true });
     try {
-      const book = await db.createBook({
+      console.log('===== saveBook 시작 =====');
+      console.log('userId:', userId);
+      console.log('bookData:', bookData);
+      
+      const dataToSave = {
         ...bookData,
         user_id: userId,
-      });
+      };
+      console.log('저장할 데이터:', dataToSave);
+      
+      const book = await db.createBook(dataToSave);
+      
+      console.log('✅ 책 저장 성공:', book);
+      
       set((state) => ({
         books: [book, ...state.books],
         isSyncing: false,
       }));
       return book;
-    } catch (error) {
-      console.error('Failed to save book:', error);
+    } catch (error: any) {
+      console.error('❌ saveBook 실패');
+      console.error('에러:', error);
+      console.error('에러 메시지:', error?.message);
+      console.error('에러 코드:', error?.code);
+      console.error('에러 상세:', error?.details);
       set({ error: '책 저장에 실패했습니다.', isSyncing: false });
       throw error;
     }
@@ -119,16 +133,24 @@ export const useBooksStore = create<BooksState>((set, get) => ({
   },
 
   findOrCreateBook: async (userId, bookData) => {
+    console.log('===== findOrCreateBook 시작 =====');
+    console.log('userId:', userId);
+    console.log('bookData:', bookData);
+    
     // 이미 저장된 책인지 확인 (ISBN으로)
     if (bookData.isbn) {
       const existingBook = get().books.find((b) => b.isbn === bookData.isbn);
-      if (existingBook) {
+      // ⚠️ 임시 ID가 아닌 실제 UUID를 가진 책만 반환
+      if (existingBook && !existingBook.id.startsWith('book-')) {
+        console.log('✅ 로컬에서 기존 책 찾음 (실제 UUID):', existingBook.title);
         return existingBook;
       }
 
       // Supabase에서도 확인
+      console.log('Supabase에서 책 검색 중...');
       const dbBook = await db.findBookByISBN(userId, bookData.isbn);
       if (dbBook) {
+        console.log('✅ Supabase에서 기존 책 찾음:', dbBook.title);
         // 로컬 스토어에 추가
         set((state) => ({
           books: [dbBook, ...state.books.filter((b) => b.id !== dbBook.id)],
@@ -138,7 +160,15 @@ export const useBooksStore = create<BooksState>((set, get) => ({
     }
 
     // 새 책 저장
-    return get().saveBook(userId, bookData);
+    console.log('새 책 저장 시도...');
+    try {
+      const result = await get().saveBook(userId, bookData);
+      console.log('✅ 새 책 저장 성공:', result.title);
+      return result;
+    } catch (error) {
+      console.error('❌ 책 저장 실패:', error);
+      throw error;
+    }
   },
 
   // Selectors
